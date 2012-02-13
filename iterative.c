@@ -74,7 +74,7 @@ typedef struct {
   int unread_count;
   char buf[RIO_BUFFERSIZE];
   char* bufptr;
-
+}rio_t;
 
 void rio_init(rio_t* rp, int fd){
   rp->fd = fd;
