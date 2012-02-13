@@ -6,24 +6,25 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define MAX_REQUEST_LEN 2048
 
 struct HttpRequest {
   int client_fd;
   char method[8];
-  char version[8];
+  char version[16];
   char uri[MAX_REQUEST_LEN];
 };
 
-struct HttpRequest* http_parse_request(int fd);
+int http_parse_request(int fd, struct HttpRequest* request);
 int http_handle_request(struct HttpRequest* request);
 
 extern int errno;
 
 int main(int argc, char* argv[]){
   struct sockaddr_in server_addr;
-  struct sockaddr remote_addr;
+  struct sockaddr_in remote_addr;
 
   const int BUFFER_SIZE = 4096;
   char buf[BUFFER_SIZE];
@@ -51,12 +52,15 @@ int main(int argc, char* argv[]){
 
   while(1){
     socklen_t sock_len = sizeof(remote_addr);
-    int client_fd = accept(listen_fd, &remote_addr, &sock_len);
+    int client_fd = accept(listen_fd, (struct sockaddr*)&remote_addr, &sock_len);
 
-    static char* result = "Welcome to network programming\n";
+    char client_ip[32];
+    inet_ntop(AF_INET, (const void *)&remote_addr.sin_addr, client_ip, sizeof(client_ip));
 
-    struct HttpRequest* request = http_parse_request(client_fd);
-    http_handle_request(request);
+    printf("Request from %s[fd:%d]\n", client_ip, client_fd);
+    struct HttpRequest request;
+    http_parse_request(client_fd, &request);
+    http_handle_request(&request);
     
     close(client_fd);
   }
@@ -70,7 +74,7 @@ typedef struct {
   int unread_count;
   char buf[RIO_BUFFERSIZE];
   char* bufptr;
-} rio_t;
+
 
 void rio_init(rio_t* rp, int fd){
   rp->fd = fd;
@@ -83,7 +87,6 @@ int rio_read(rio_t *rp, char* buf, size_t n){
 
   while(rp->unread_count <= 0){
     rp->unread_count = read(rp->fd, rp->buf, sizeof(rp->buf));
-    printf("\nDEBUG:%s", rp->buf);
     if(rp->unread_count < 0){
       if(errno != EINTR){
 	return -1;
@@ -136,11 +139,10 @@ ssize_t rio_readline(rio_t* rp, void* buf, size_t maxlen){
 
 #define MAX_LINE 8194
 
-struct HttpRequest* http_parse_request(int fd){
+int http_parse_request(int fd, struct HttpRequest* request){
   char buf[MAX_LINE], method[MAX_LINE], uri[MAX_LINE], version[MAX_LINE];
   int line_length;
 
-  struct HttpRequest* request = malloc(sizeof(struct HttpRequest));
   request->client_fd = fd;
   
   rio_t rio;
@@ -148,15 +150,15 @@ struct HttpRequest* http_parse_request(int fd){
 
   //TODO: need to check result, try to telnet and input nothing
   line_length = rio_readline(&rio, buf, MAX_LINE);
-  printf("get first line(%d): %s\n", line_length, buf);
-  sscanf(buf, "%s %s %s", method, uri, version);
 
-  strncpy(request->method, method, sizeof(request->method));
-  strncpy(request->uri, uri, sizeof(request->uri));
-  strncpy(request->version, version, sizeof(request->version));
+  printf("%s", buf);
+  
+  char format[16];
+  sprintf(format, "%%%lus %%%lus %%%lus", sizeof(request->method) - 1, sizeof(request->uri) - 1, sizeof(request->version) - 1);
+  sscanf(buf, format, request->method, request->uri, request->version);
 
   while((line_length = rio_readline(&rio, buf, MAX_LINE)) > 0){
-    printf("new line: %s", buf);
+    printf("  %s", buf);
     if(strncmp(buf, "\r\n", line_length) == 0){
       break;
     }
@@ -165,19 +167,14 @@ struct HttpRequest* http_parse_request(int fd){
       break;
     }
   }
-  /*
-  strncpy(request->uri, "/", sizeof(request->uri));
-  strncpy(request->method, "GET", sizeof(request->method));
-  strncpy(request->version, "HTTP/1.0", sizeof(request->version));
-  */
 
-  return request;
+  return 0;
 }
 
 int http_handle_request(struct HttpRequest* request){
-  char message[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nWelcome to network programming!\n";
+  char message[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nWelcome to network programming!\n";
 
-  printf("Response to: %s %s %s\n", request->method, request->uri, request->version);
+  printf("Response to: %s %s %s\n\n", request->method, request->uri, request->version);
   write(request->client_fd, message, strlen(message));
 
   return 0;
