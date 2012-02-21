@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <memory.h>
 
+#include <errno.h>
+
 #include "rio.h"
 
 void rio_init(rio_t* rp, int fd){
@@ -10,6 +12,7 @@ void rio_init(rio_t* rp, int fd){
   rp->unread_count = 0;
 }
 
+//TODO: need to handle EAGAIN in read and write
 int rio_read(rio_t *rp, char* buf, size_t n){
   int count=n;
 
@@ -35,6 +38,27 @@ int rio_read(rio_t *rp, char* buf, size_t n){
   rp->unread_count -=count;
 
   return count;
+}
+
+int rio_write(rio_t* rp, const char* buf, size_t n){
+  int left = n;
+  int nwriten;
+  const char* bufp = buf;
+  
+  while(left > 0){
+    if((nwriten = write(rp->fd, bufp, n)) < 0){
+      if(errno == EINTR){
+        nwriten = 0;
+      }else{
+        return -1;
+      }      
+    }
+
+    left -= nwriten;
+    bufp += nwriten;
+  }
+
+  return n;
 }
 
 ssize_t rio_readline(rio_t* rp, void* buf, size_t maxlen){

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <malloc.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -14,8 +15,146 @@
 
 #define MAX_EVENTS 10
 
-int http_parse_request(int fd, struct HttpRequest *request);
-int http_handle_request(struct HttpRequest *request);
+int setnonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | SOCK_NONBLOCK) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+#define REQUEST_MAX_LENGTH 8192
+
+#define CONNECTION_BUFFER_SIZE 100
+#define WRITE_BUFFER_SIZE 8192
+
+typedef struct buffered_request {
+    rio_t *rio;
+
+    int readpos;
+    int unread_length;
+    char readbuf[REQUEST_MAX_LENGTH];
+
+    int writepos;
+    char writebuf[WRITE_BUFFER_SIZE];
+
+    struct buffered_request *previous;
+    struct buffered_request *next;
+} buffered_request_t;
+
+static buffered_request_t *buffered_requests[CONNECTION_BUFFER_SIZE];
+
+int buffered_request_read(buffered_request_t * r) {
+    int read_count = rio_read(r->rio, r->readbuf + r->readpos, sizeof(r->readbuf) - r->readpos);
+
+    if (read_count == -1) {
+        return read_count;
+    }
+
+    r->unread_length += read_count;
+    return read_count;
+}
+
+int buffered_request_write(buffered_request_t * r) {
+    int write_count = rio_write(r->rio, r->writebuf + r->writepos, sizeof(r->writebuf) - r->writepos);
+
+    if (write_count == -1) {
+        return write_count;
+    }
+
+    r->writepos += write_count;
+    return write_count;
+}
+
+int buffered_request_add_response(buffered_request_t* r, char* buf, int length){
+  int n;
+  int left_space = sizeof(r->writebuf) - r->writepos;
+  for(n = 0; n < length && n < left_space; n++){
+    r->writebuf[r->writepos + n] = buf[n];
+  }
+
+  r->writebuf[r->writepos +n] = '\0';
+
+  return n;
+}
+
+buffered_request_t *buffered_request_init(int fd) {
+    buffered_request_t *request = malloc(sizeof(buffered_request_t));
+    request->rio = malloc(sizeof(rio_t));
+    rio_init(request->rio, fd);
+
+    buffered_request_t *request_in_same_slot = buffered_requests[fd];
+    if (request_in_same_slot == NULL) {
+        buffered_requests[fd] = request;
+        return request;
+    }
+
+    while (request_in_same_slot != NULL) {
+        request_in_same_slot = request_in_same_slot->next;
+    }
+
+    request_in_same_slot->next = request;
+    request->previous = request_in_same_slot;
+
+    return request;
+}
+
+void buffered_request_clear(buffered_request_t * r) {
+    buffered_request_t *requests_slot = buffered_requests[r->rio->fd];
+    if (requests_slot == r) {
+        requests_slot = r->next;
+    } else {
+        r->previous->next = r->next;
+        r->next->previous = r->previous;
+    }
+
+    free(r);
+    r = NULL;
+}
+
+/*
+TODO: need to handle huge request which length more than REQUEST_MAX_LENGTH
+*/
+int buffered_request_read_all_available_data(buffered_request_t * r) {
+    int total_size = 0;
+
+    while (1) {
+        int len = buffered_request_read(r);
+
+        if (len == -1) {
+            return total_size;
+        }
+        total_size += len;
+    }
+}
+
+int buffered_request_write_all_available_data(buffered_request_t * r) {
+    buffered_request_write(r);
+
+    return 1;
+}
+
+
+static buffered_request_t *buffered_request_for_connection(int fd) {
+    buffered_request_t *r = buffered_requests[fd];
+
+    while (r != NULL) {
+        if (r->rio->fd == fd) {
+            return r;
+        }
+
+        r = r->next;
+    }
+
+    return NULL;
+}
+
+int http_parse_request(buffered_request_t * buffered, struct HttpRequest *request);
+int http_handle_request(buffered_request_t * buffered, struct HttpRequest *request);
 
 int main(int argc, char *argv[]) {
     struct sockaddr_in server_addr;
@@ -29,12 +168,13 @@ int main(int argc, char *argv[]) {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuseaddr = 1;
 
-    int epoll_fd = epoll_create(0);
+    int epoll_fd = epoll_create(10/*deprecated?*/);
     if (epoll_fd == -1) {
         printf("could not create epoll descriptor\n");
         return -1;
     }
-
+    
+    setnonblocking(listen_fd);
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
     memset(&server_addr, 0, sizeof(server_addr));
 
@@ -80,6 +220,8 @@ int main(int argc, char *argv[]) {
                 inet_ntop(AF_INET, (const void *)&remote_addr.sin_addr, client_ip, sizeof(client_ip));
                 printf("Request from %s[fd:%d]\n", client_ip, client_fd);
 
+                buffered_request_init(client_fd);
+
                 setnonblocking(client_fd);
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = client_fd;
@@ -88,22 +230,31 @@ int main(int argc, char *argv[]) {
                 }
             } else {
                 int client_fd = events[n].data.fd;
+                buffered_request_t *buffered = buffered_request_for_connection(client_fd);
 
                 if (events[n].events & EPOLLIN) {
-                    buffered_request_t *buffer = buffer_read_all_available_data(client_fd);
-
+                    int read_count = buffered_request_read_all_available_data(buffered);
+                    printf("received request:\n%s\n", &(buffered->readbuf[buffered->readpos]));
+                    
                     //TODO: handle request only if already a full request
                     struct HttpRequest request;
-                    http_parse_request(buffer, &request);
-                    http_handle_request(&request);
+                    if(http_parse_request(buffered, &request)< 0){
+                      printf("failed to parse request\n");
+                    }
+                    
+                    http_handle_request(buffered, &request);
+                    printf("SEND response1:\n%s\n", &(buffered->writebuf[buffered->writepos]));
+                    buffered_request_write_all_available_data(buffered);
                 }
 
                 if (events[n].events & EPOLLOUT) {
-                    buffer_write_all_available_data(client_fd);
+                    printf("SEND response:\n%s\n", &(buffered->writebuf[buffered->writepos]));
+                    buffered_request_write_all_available_data(buffered);
                 }
 
                 if (events[n].events & EPOLLHUP) {
-                    buffer_clear(client_fd);
+                    printf("disconnected from %d\n", client_fd);
+                    buffered_request_clear(buffered);
                     close(client_fd);
                 }
             }
@@ -112,69 +263,24 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-#define REQUEST_MAX_LENGTH 8192
-
-#define CONNECTION_BUFFER_SIZE 100
-#define WRITE_BUFFER_SIZE 8192
-
-struct buffered_request {
-    rio_t *rio;
-
-    int readpos;
-    int read_length;
-    char readbuf[REQUEST_MAX_LENGTH];
-
-    int writepos;
-    char writebuf[WRITE_BUFFER_SIZE];
-
-    buffered_request_t *next;
-} buffered_request_t;
-
-static buffered_request_t *buffered_requests[CONNECTION_BUFFER_SIZE];
-
-/*
-TODO: need to handle huge request which length more than REQUEST_MAX_LENGTH
-*/
-buffered_request_t *buffer_read_all_available_data(int fd) {
-    buffered_request_t *r = buffered_request_for_connection(fd);
-    int total_size = 0;
-
-    while (1) {
-        int len = buffer_read(r);
-
-        if (len == -1) {
-            return r;
-        }
-        total_size += len;
-    }
-}
-
-int buffer_read(buffered_request_t * r) {
-    int read_count = rio_read(r->rio, r->buf + r->readpos, sizeof(r->buf) - r->readpos);
-
-    if (read_count == -1) {
-        return read_count;
-    }
-
-    r->readpos += read_count;
-    return read_count;
-}
-
-static buffered_request_for_connection(int fd) {
-    buffered_request_t *r = buffered_requests[fd];
-
-    while (r != NULL) {
-        if (r->rio->fd == fd) {
-            return r;
-        }
-
-        r = r->next;
-    }
-
-    return NULL;
-}
-
 #define MAX_LINE 8194
+
+int buffered_request_readline(buffered_request_t * buffered, char *buf, int max_length) {
+    int n;
+    for (n = 0; n < max_length -1 && n < buffered->unread_length; n++) {
+        buf[n] = buffered->readbuf[buffered->readpos + n];
+
+        if (buf[n] == '\n') {
+          n++;
+          break;
+        }
+    }
+
+    buffered->readpos +=n;
+    buffered->unread_length -=n;
+    buf[n] = '\0';
+    return n;
+}
 
 int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request) {
     char buf[MAX_LINE];
@@ -182,11 +288,12 @@ int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request)
 
     request->client_fd = buffer->rio->fd;
 
-    rio_t rio;
-    rio_init(&rio, fd);
-
+    printf("Parse request\n========\n");
     //TODO: need to check result, try to telnet and input nothing
-    line_length = rio_readline(&rio, buf, MAX_LINE);
+    if(buffered_request_readline(buffer, buf, MAX_LINE) <= 0){
+      printf("failed to read line\n");
+      return -1;
+    }
 
     printf("%s", buf);
 
@@ -196,7 +303,7 @@ int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request)
         sizeof(request->version) - 1);
     sscanf(buf, format, request->method, request->uri, request->version);
 
-    while ((line_length = rio_readline(&rio, buf, MAX_LINE)) > 0) {
+    while ((line_length = buffered_request_readline(buffer, buf, MAX_LINE)) > 0) {
         printf(" %s", buf);
         if (strncmp(buf, "\r\n", line_length) == 0) {
             break;
@@ -210,11 +317,11 @@ int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request)
     return 0;
 }
 
-int http_handle_request(struct HttpRequest *request) {
+int http_handle_request(buffered_request_t * buffered, struct HttpRequest *request) {
     char message[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nWelcome to network programming!\n";
 
     printf("Response to: %s %s %s\n\n", request->method, request->uri, request->version);
-    write(request->client_fd, message, strlen(message));
+    buffered_request_add_response(buffered, message, strlen(message));
 
     return 0;
 }
