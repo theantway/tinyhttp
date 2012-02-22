@@ -40,6 +40,7 @@ typedef struct buffered_request {
     char readbuf[REQUEST_MAX_LENGTH];
 
     int writepos;
+    int unwrite_length;
     char writebuf[WRITE_BUFFER_SIZE];
 
     struct buffered_request *previous;
@@ -60,24 +61,26 @@ int buffered_request_read(buffered_request_t * r) {
 }
 
 int buffered_request_write(buffered_request_t * r) {
-    int write_count = rio_write(r->rio, r->writebuf + r->writepos, sizeof(r->writebuf) - r->writepos);
+    int write_count = rio_write(r->rio, r->writebuf + r->writepos, r->unwrite_length);
 
     if (write_count == -1) {
         return write_count;
     }
 
     r->writepos += write_count;
+    r->unwrite_length -=write_count;
     return write_count;
 }
 
 int buffered_request_add_response(buffered_request_t* r, char* buf, int length){
   int n;
-  int left_space = sizeof(r->writebuf) - r->writepos;
+  int left_space = sizeof(r->writebuf) - r->writepos - r->unwrite_length;
   for(n = 0; n < length && n < left_space; n++){
-    r->writebuf[r->writepos + n] = buf[n];
+    r->writebuf[r->writepos + r->unwrite_length + n] = buf[n];
   }
 
-  r->writebuf[r->writepos +n] = '\0';
+  r->unwrite_length += n;
+  r->writebuf[r->writepos + r->unwrite_length + n] = '\0';
 
   return n;
 }
@@ -85,15 +88,23 @@ int buffered_request_add_response(buffered_request_t* r, char* buf, int length){
 buffered_request_t *buffered_request_init(int fd) {
     buffered_request_t *request = malloc(sizeof(buffered_request_t));
     request->rio = malloc(sizeof(rio_t));
+    request->readpos = 0;
+    request->writepos = 0;
+    request->unread_length = 0;
+    request->unwrite_length = 0;
+    request->next = NULL;
+    request->previous = NULL;
+    
     rio_init(request->rio, fd);
 
     buffered_request_t *request_in_same_slot = buffered_requests[fd];
     if (request_in_same_slot == NULL) {
+      printf("empty slot\n");
         buffered_requests[fd] = request;
         return request;
     }
 
-    while (request_in_same_slot != NULL) {
+    while (request_in_same_slot->next != NULL) {
         request_in_same_slot = request_in_same_slot->next;
     }
 
@@ -106,12 +117,13 @@ buffered_request_t *buffered_request_init(int fd) {
 void buffered_request_clear(buffered_request_t * r) {
     buffered_request_t *requests_slot = buffered_requests[r->rio->fd];
     if (requests_slot == r) {
-        requests_slot = r->next;
+        buffered_requests[r->rio->fd] = r->next;
     } else {
         r->previous->next = r->next;
         r->next->previous = r->previous;
     }
 
+    free(r->rio);
     free(r);
     r = NULL;
 }
@@ -138,6 +150,13 @@ int buffered_request_write_all_available_data(buffered_request_t * r) {
     return 1;
 }
 
+int buffered_request_has_wroten_all(buffered_request_t* r){
+  if(r->unwrite_length > 0){
+    return 0;
+  }
+
+  return 1;
+}
 
 static buffered_request_t *buffered_request_for_connection(int fd) {
     buffered_request_t *r = buffered_requests[fd];
@@ -213,7 +232,7 @@ int main(int argc, char *argv[]) {
                 socklen_t sock_len = sizeof(remote_addr);
                 int client_fd = accept(listen_fd, (struct sockaddr *)&remote_addr, &sock_len);
                 if (client_fd == -1) {
-                    printf("Could not accpet connection request\n");
+                    printf("Could not accept connection request\n");
                 }
 
                 char client_ip[32];
@@ -223,7 +242,7 @@ int main(int argc, char *argv[]) {
                 buffered_request_init(client_fd);
 
                 setnonblocking(client_fd);
-                ev.events = EPOLLIN | EPOLLET;
+                ev.events = EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLET;
                 ev.data.fd = client_fd;
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
                     printf("Could not add new connection request to epoll descriptor\n");
@@ -234,26 +253,36 @@ int main(int argc, char *argv[]) {
 
                 if (events[n].events & EPOLLIN) {
                     int read_count = buffered_request_read_all_available_data(buffered);
-                    printf("received request:\n%s\n", &(buffered->readbuf[buffered->readpos]));
+                    if(read_count > 0){
+                      //printf("[%d]Received request:\n%s\n", client_fd, &(buffered->readbuf[buffered->readpos]));
+                        
+                        //TODO: handle request only if already a full request
+                        struct HttpRequest request;
+                        if(http_parse_request(buffered, &request)< 0){
+                          printf("failed to parse request\n");
+                        }
                     
-                    //TODO: handle request only if already a full request
-                    struct HttpRequest request;
-                    if(http_parse_request(buffered, &request)< 0){
-                      printf("failed to parse request\n");
+                        http_handle_request(buffered, &request);
+                    }else{
+                      //printf("read 0 bytes\n");
                     }
-                    
-                    http_handle_request(buffered, &request);
-                    printf("SEND response1:\n%s\n", &(buffered->writebuf[buffered->writepos]));
-                    buffered_request_write_all_available_data(buffered);
                 }
 
                 if (events[n].events & EPOLLOUT) {
-                    printf("SEND response:\n%s\n", &(buffered->writebuf[buffered->writepos]));
+                  if(!buffered_request_has_wroten_all(buffered)){
+                    //printf("[%d]SEND response:\n%s\n", client_fd, &(buffered->writebuf[buffered->writepos]));
                     buffered_request_write_all_available_data(buffered);
+                    if(buffered_request_has_wroten_all(buffered)){
+                      //printf("[%d]Disconnected\n", client_fd);
+                      buffered_request_clear(buffered);
+                      epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
+                      close(client_fd);
+                    }
+                  }
                 }
 
                 if (events[n].events & EPOLLHUP) {
-                    printf("disconnected from %d\n", client_fd);
+                  //printf("[%d]Disconnected\n", client_fd);
                     buffered_request_clear(buffered);
                     close(client_fd);
                 }
@@ -288,14 +317,14 @@ int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request)
 
     request->client_fd = buffer->rio->fd;
 
-    printf("Parse request\n========\n");
+    //printf("Parse request\n========\n");
     //TODO: need to check result, try to telnet and input nothing
     if(buffered_request_readline(buffer, buf, MAX_LINE) <= 0){
       printf("failed to read line\n");
       return -1;
     }
 
-    printf("%s", buf);
+    //printf("%s", buf);
 
     char format[16];
 
@@ -318,10 +347,16 @@ int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request)
 }
 
 int http_handle_request(buffered_request_t * buffered, struct HttpRequest *request) {
-    char message[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nWelcome to network programming!\n";
+    char message[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 32\r\n\r\nWelcome to network programming!\n";
 
-    printf("Response to: %s %s %s\n\n", request->method, request->uri, request->version);
-    buffered_request_add_response(buffered, message, strlen(message));
+    char message_404[] = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
+    
+    //printf("Response to: %s %s %s\n\n", request->method, request->uri, request->version);
 
+    if(strcmp(request->uri, "/favicon.ico") == 0){
+      buffered_request_add_response(buffered, message_404, strlen(message_404));
+    }else{
+      buffered_request_add_response(buffered, message, strlen(message));
+    }
     return 0;
 }
