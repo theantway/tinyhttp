@@ -13,7 +13,7 @@
 #include "rio.h"
 #include "http.h"
 
-#define MAX_EVENTS 10
+#define MAX_EVENTS 200
 
 int setnonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL);
@@ -29,7 +29,7 @@ int setnonblocking(int fd) {
 
 #define REQUEST_MAX_LENGTH 8192
 
-#define CONNECTION_BUFFER_SIZE 100
+#define CONNECTION_BUFFER_SIZE 200
 #define WRITE_BUFFER_SIZE 8192
 
 typedef struct buffered_request {
@@ -75,12 +75,16 @@ int buffered_request_write(buffered_request_t * r) {
 int buffered_request_add_response(buffered_request_t* r, char* buf, int length){
   int n;
   int left_space = sizeof(r->writebuf) - r->writepos - r->unwrite_length;
+  int len = length > left_space ? left_space : length;
+  /*
   for(n = 0; n < length && n < left_space; n++){
     r->writebuf[r->writepos + r->unwrite_length + n] = buf[n];
   }
-
-  r->unwrite_length += n;
-  r->writebuf[r->writepos + r->unwrite_length + n] = '\0';
+  */
+  strncpy(&r->writebuf[r->writepos + r->unwrite_length], buf, len);
+  
+  r->unwrite_length += len;
+  r->writebuf[r->writepos + r->unwrite_length + len] = '\0';
 
   return n;
 }
@@ -99,7 +103,7 @@ buffered_request_t *buffered_request_init(int fd) {
 
     buffered_request_t *request_in_same_slot = buffered_requests[fd];
     if (request_in_same_slot == NULL) {
-      printf("empty slot\n");
+      // printf("empty slot\n");
         buffered_requests[fd] = request;
         return request;
     }
@@ -187,7 +191,7 @@ int main(int argc, char *argv[]) {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuseaddr = 1;
 
-    int epoll_fd = epoll_create(10/*deprecated?*/);
+    int epoll_fd = epoll_create(100/*deprecated?*/);
     if (epoll_fd == -1) {
         printf("could not create epoll descriptor\n");
         return -1;
@@ -235,9 +239,9 @@ int main(int argc, char *argv[]) {
                     printf("Could not accept connection request\n");
                 }
 
-                char client_ip[32];
-                inet_ntop(AF_INET, (const void *)&remote_addr.sin_addr, client_ip, sizeof(client_ip));
-                printf("Request from %s[fd:%d]\n", client_ip, client_fd);
+                //char client_ip[32];
+                //inet_ntop(AF_INET, (const void *)&remote_addr.sin_addr, client_ip, sizeof(client_ip));
+                //printf("Request from %s[fd:%d]\n", client_ip, client_fd);
 
                 buffered_request_init(client_fd);
 
@@ -272,18 +276,20 @@ int main(int argc, char *argv[]) {
                   if(!buffered_request_has_wroten_all(buffered)){
                     //printf("[%d]SEND response:\n%s\n", client_fd, &(buffered->writebuf[buffered->writepos]));
                     buffered_request_write_all_available_data(buffered);
+                    
                     if(buffered_request_has_wroten_all(buffered)){
                       //printf("[%d]Disconnected\n", client_fd);
                       buffered_request_clear(buffered);
-                      epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
+                      //epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
                       close(client_fd);
-                    }
+                      }
                   }
                 }
 
                 if (events[n].events & EPOLLHUP) {
                   //printf("[%d]Disconnected\n", client_fd);
                     buffered_request_clear(buffered);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
                     close(client_fd);
                 }
             }
@@ -296,23 +302,29 @@ int main(int argc, char *argv[]) {
 
 int buffered_request_readline(buffered_request_t * buffered, char *buf, int max_length) {
     int n;
-    for (n = 0; n < max_length -1 && n < buffered->unread_length; n++) {
-        buf[n] = buffered->readbuf[buffered->readpos + n];
+    int unread_length = buffered->unread_length;
+    int max = max_length - 1 > unread_length ? unread_length : max_length -1;
+    
+    char* source_bufp = &buffered->readbuf[buffered->readpos];
+    buf = source_bufp;
+    char* dest_bufp = buf;
 
-        if (buf[n] == '\n') {
-          n++;
-          break;
-        }
+    char c;
+    
+    for (n = 0; n < max && ( *(source_bufp++) != '\n'); ++n) {
     }
 
+    //    strncpy(buf, &buffered->readbuf[buffered->readpos], n);
+    
     buffered->readpos +=n;
     buffered->unread_length -=n;
-    buf[n] = '\0';
+    //buf[n] = '\0';
     return n;
 }
 
 int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request) {
-    char buf[MAX_LINE];
+  //char buf[MAX_LINE];
+    char* buf = NULL;
     int line_length;
 
     request->client_fd = buffer->rio->fd;
@@ -325,15 +337,16 @@ int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request)
     }
 
     //printf("%s", buf);
-
+    /*
     char format[16];
 
     sprintf(format, "%%%lus %%%lus %%%lus", sizeof(request->method) - 1, sizeof(request->uri) - 1,
         sizeof(request->version) - 1);
     sscanf(buf, format, request->method, request->uri, request->version);
-
+    */
+    strcpy(request->uri, "/");
     while ((line_length = buffered_request_readline(buffer, buf, MAX_LINE)) > 0) {
-        printf(" %s", buf);
+      //        printf(" %s", buf);
         if (strncmp(buf, "\r\n", line_length) == 0) {
             break;
         }
