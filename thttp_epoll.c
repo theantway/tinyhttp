@@ -108,10 +108,14 @@ buffered_request_t *buffered_request_init(int fd) {
         return request;
     }
 
+    int idx = 0;
     while (request_in_same_slot->next != NULL) {
         request_in_same_slot = request_in_same_slot->next;
+        idx ++;
     }
 
+    if(idx > 0)
+      printf("idx %d for connection\n", idx);
     request_in_same_slot->next = request;
     request->previous = request_in_same_slot;
 
@@ -179,6 +183,12 @@ static buffered_request_t *buffered_request_for_connection(int fd) {
 int http_parse_request(buffered_request_t * buffered, struct HttpRequest *request);
 int http_handle_request(buffered_request_t * buffered, struct HttpRequest *request);
 
+void http_close_connection(buffered_request_t* buffered){
+  close(buffered->rio->fd);
+  buffered_request_clear(buffered);
+
+}
+
 int main(int argc, char *argv[]) {
     struct sockaddr_in server_addr;
     struct sockaddr_in remote_addr;
@@ -191,7 +201,8 @@ int main(int argc, char *argv[]) {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuseaddr = 1;
 
-    int epoll_fd = epoll_create(100/*deprecated?*/);
+    bzero(&ev, sizeof(ev));
+    int epoll_fd = epoll_create(200/*deprecated?*/);
     if (epoll_fd == -1) {
         printf("could not create epoll descriptor\n");
         return -1;
@@ -246,7 +257,7 @@ int main(int argc, char *argv[]) {
                 buffered_request_init(client_fd);
 
                 setnonblocking(client_fd);
-                ev.events = EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLET;
+                ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
                 ev.data.fd = client_fd;
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
                     printf("Could not add new connection request to epoll descriptor\n");
@@ -255,6 +266,13 @@ int main(int argc, char *argv[]) {
                 int client_fd = events[n].data.fd;
                 buffered_request_t *buffered = buffered_request_for_connection(client_fd);
 
+                if (events[n].events & EPOLLHUP) {
+                  printf("[%d]Hup Disconnected\n", client_fd);
+                    http_close_connection(buffered);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
+                    continue;
+                }
+                
                 if (events[n].events & EPOLLIN) {
                     int read_count = buffered_request_read_all_available_data(buffered);
                     if(read_count > 0){
@@ -267,8 +285,10 @@ int main(int argc, char *argv[]) {
                         }
                     
                         http_handle_request(buffered, &request);
-                    }else{
-                      //printf("read 0 bytes\n");
+                    }else if(read_count == 0){
+                      http_close_connection(buffered);
+                      epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                      
+                      continue;
                     }
                 }
 
@@ -276,22 +296,25 @@ int main(int argc, char *argv[]) {
                   if(!buffered_request_has_wroten_all(buffered)){
                     //printf("[%d]SEND response:\n%s\n", client_fd, &(buffered->writebuf[buffered->writepos]));
                     buffered_request_write_all_available_data(buffered);
-                    
+                                         
                     if(buffered_request_has_wroten_all(buffered)){
                       //printf("[%d]Disconnected\n", client_fd);
-                      buffered_request_clear(buffered);
-                      //epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
-                      close(client_fd);
+                      http_close_connection(buffered);
+                      epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
+                      continue;
                       }
+                    
                   }
                 }
 
-                if (events[n].events & EPOLLHUP) {
-                  //printf("[%d]Disconnected\n", client_fd);
-                    buffered_request_clear(buffered);
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
-                    close(client_fd);
+                if (events[n].events & EPOLLERR) {
+                    printf("[%d] ERR Disconnected\n", client_fd);
+
+                    http_close_connection(buffered);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
+                    continue;
                 }
+
             }
         }
     }
@@ -362,7 +385,7 @@ int http_parse_request(buffered_request_t * buffer, struct HttpRequest *request)
 int http_handle_request(buffered_request_t * buffered, struct HttpRequest *request) {
     char message[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 32\r\n\r\nWelcome to network programming!\n";
 
-    char message_404[] = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
+    char message_404[] = "HTTP/1.1 404 NOT FOUND\r\nContent-Length: 0\r\n\r\n";
     
     //printf("Response to: %s %s %s\n\n", request->method, request->uri, request->version);
 
