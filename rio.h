@@ -1,4 +1,5 @@
 #ifndef RIO_H
+#define RIO_H
 
 #include <unistd.h>
 
