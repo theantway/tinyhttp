@@ -29,39 +29,44 @@ int setnonblocking(int fd) {
     return 0;
 }
 
-void request_cb(struct ev_loop *loop, ev_io *request_evio, int revents){
+void write_cb(struct ev_loop *loop, ev_io *request_evio, int revents){
+  buffered_request_t *buffered = buffered_request_for_connection(request_evio->fd);
+
+  if(!buffered_request_has_wroten_all(buffered)){
+    //printf("[%d]SEND response:\n%s\n", client_fd, &(buffered->writebuf[buffered->writepos]));
+    buffered_request_write_all_available_data(buffered);
+                                         
+    if(buffered_request_has_wroten_all(buffered)){
+      //printf("[%d]Disconnected\n", client_fd);
+      ev_io_stop(EV_A_ request_evio);
+      http_close_connection(buffered);
+    }
+  }
+}
+
+void read_cb(struct ev_loop *loop, ev_io *request_evio, int revents){
   buffered_request_t *buffered = buffered_request_for_connection(request_evio->fd);
                
-  if (revents & EV_READ) {
-    int read_count = buffered_request_read_all_available_data(buffered);
-    if(read_count > 0){
-      //printf("[%d]Received request:\n%s\n", client_fd, &(buffered->readbuf[buffered->readpos]));
+  int read_count = buffered_request_read_all_available_data(buffered);
+  if(read_count > 0){
+    //printf("[%d]Received request:\n%s\n", client_fd, &(buffered->readbuf[buffered->readpos]));
                         
-      //TODO: handle request only if already a full request
-      http_request_t request;
-      if(http_parse_request(buffered, &request)< 0){
-        printf("failed to parse request\n");
-      }
-                    
-      http_handle_request(buffered, &request);
-    }else if(read_count == 0){
-      http_close_connection(buffered);
-      ev_io_stop(EV_A_ request_evio);
+    //TODO: handle request only if already a full request
+    http_request_t request;
+    if(http_parse_request(buffered, &request)< 0){
+      printf("failed to parse request\n");
     }
+                    
+    http_handle_request(buffered, &request);
+    ev_io_stop(EV_A_ request_evio);
+    ev_io_init(&buffered->request_ev, write_cb, request_evio->fd, EV_WRITE);
+    ev_io_start(loop, &buffered->request_ev);
+  }else if(read_count == 0){
+    printf("Close connection because read 0\n");
+    ev_io_stop(EV_A_ request_evio);
+    http_close_connection(buffered);
   }
 
-  if (revents & EV_WRITE) {
-    if(!buffered_request_has_wroten_all(buffered)){
-      //printf("[%d]SEND response:\n%s\n", client_fd, &(buffered->writebuf[buffered->writepos]));
-      buffered_request_write_all_available_data(buffered);
-                                         
-      if(buffered_request_has_wroten_all(buffered)){
-        //printf("[%d]Disconnected\n", client_fd);
-        http_close_connection(buffered);
-        ev_io_stop(EV_A_ request_evio);
-      }
-    }
-  }
 }
 
 void accept_cb(struct ev_loop *loop, ev_io *listen_evio, int revents){
@@ -80,7 +85,8 @@ void accept_cb(struct ev_loop *loop, ev_io *listen_evio, int revents){
   buffered_request_t* request = buffered_request_init(client_fd);
 
   setnonblocking(client_fd);
-  ev_io_init(&request->request_ev, request_cb, client_fd, EV_READ|EV_WRITE);
+  ev_io_init(&request->request_ev, read_cb, client_fd, EV_READ);
+
   ev_io_start(loop, &request->request_ev);
 }
 
