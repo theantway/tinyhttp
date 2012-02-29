@@ -6,8 +6,10 @@
 #include <fcntl.h>
 
 #include <sys/epoll.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include "ev.h"
 #include "rio.h"
@@ -33,6 +35,8 @@ void write_cb(struct ev_loop *loop, ev_io *request_evio, int revents){
   buffered_request_t *buffered = buffered_request_for_connection(request_evio->fd);
 
   if(!buffered_request_has_wroten_all(buffered)){
+    static int enable_cork = 1;
+    setsockopt(request_evio->fd, SOL_TCP, TCP_CORK, &enable_cork, sizeof(enable_cork));
     //printf("[%d]SEND response:\n%s\n", client_fd, &(buffered->writebuf[buffered->writepos]));
     buffered_request_write_all_available_data(buffered);
                                          
@@ -93,7 +97,7 @@ void accept_cb(struct ev_loop *loop, ev_io *listen_evio, int revents){
 int main(int argc, char *argv[]) {
     struct sockaddr_in server_addr;
     
-    struct epoll_event ev, events[MAX_EVENTS];
+    //    struct epoll_event ev, events[MAX_EVENTS];
     ev_io ev_accept;
     struct ev_loop *loop = EV_DEFAULT;
     
@@ -104,7 +108,7 @@ int main(int argc, char *argv[]) {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuseaddr = 1;
 
-    bzero(&ev, sizeof(ev));
+    //    bzero(&ev, sizeof(ev));
     
     setnonblocking(listen_fd);
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));

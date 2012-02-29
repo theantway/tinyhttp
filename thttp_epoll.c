@@ -8,12 +8,13 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 #include "rio.h"
 #include "http.h"
 
-#define MAX_EVENTS 200
+#define MAX_EVENTS 500
 
 int setnonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL);
@@ -40,7 +41,7 @@ int main(int argc, char *argv[]) {
     int reuseaddr = 1;
 
     bzero(&ev, sizeof(ev));
-    int epoll_fd = epoll_create(200/*deprecated?*/);
+    int epoll_fd = epoll_create(500/*deprecated?*/);
     if (epoll_fd == -1) {
         printf("could not create epoll descriptor\n");
         return -1;
@@ -107,7 +108,7 @@ int main(int argc, char *argv[]) {
                 if (events[n].events & EPOLLHUP) {
                   printf("[%d]Hup Disconnected\n", client_fd);
                     http_close_connection(buffered);
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
+                    //                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
                     continue;
                 }
                 
@@ -125,20 +126,22 @@ int main(int argc, char *argv[]) {
                         http_handle_request(buffered, &request);
                     }else if(read_count == 0){
                       http_close_connection(buffered);
-                      epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                      
+                      //epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                      
                       continue;
                     }
                 }
 
                 if (events[n].events & EPOLLOUT) {
                   if(!buffered_request_has_wroten_all(buffered)){
+                    static int enable_cork = 1;
+                    setsockopt(client_fd, SOL_TCP, TCP_CORK, &enable_cork, sizeof(enable_cork));
                     //printf("[%d]SEND response:\n%s\n", client_fd, &(buffered->writebuf[buffered->writepos]));
                     buffered_request_write_all_available_data(buffered);
                                          
                     if(buffered_request_has_wroten_all(buffered)){
                       //printf("[%d]Disconnected\n", client_fd);
                       http_close_connection(buffered);
-                      epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
+                      //epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
                       continue;
                       }
                     
@@ -149,7 +152,7 @@ int main(int argc, char *argv[]) {
                     printf("[%d] ERR Disconnected\n", client_fd);
 
                     http_close_connection(buffered);
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
+                    //epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
                     continue;
                 }
 

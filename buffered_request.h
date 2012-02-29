@@ -39,7 +39,7 @@ int buffered_request_read_all_available_data(buffered_request_t * r);
 
 int buffered_request_write_all_available_data(buffered_request_t * r);
 
-int buffered_request_add_response(buffered_request_t* r, char* buf, int length);
+void buffered_request_add_response(buffered_request_t* r, char* buf, int length);
 
 int buffered_request_has_wroten_all(buffered_request_t* r);
 

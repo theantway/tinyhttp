@@ -27,8 +27,7 @@ int buffered_request_write(buffered_request_t * r) {
     return write_count;
 }
 
-int buffered_request_add_response(buffered_request_t* r, char* buf, int length){
-  int n;
+void buffered_request_add_response(buffered_request_t* r, char* buf, int length){
   int left_space = sizeof(r->writebuf) - r->writepos - r->unwrite_length;
   int len = length > left_space ? left_space : length;
 
@@ -36,8 +35,6 @@ int buffered_request_add_response(buffered_request_t* r, char* buf, int length){
   
   r->unwrite_length += len;
   r->writebuf[r->writepos + r->unwrite_length + len] = '\0';
-
-  return n;
 }
 
 buffered_request_t *buffered_request_init(int fd) {
