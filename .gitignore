@@ -4,3 +4,7 @@
 a.out
 out
 cscope.out
+*.o
+*.lo
+*.a
+lib/libev/*
