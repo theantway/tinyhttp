@@ -96,6 +96,7 @@ int main(int argc, char *argv[]) {
                 buffered_request_init(client_fd);
 
                 setnonblocking(client_fd);
+                setsockopt(client_fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
                 ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
                 ev.data.fd = client_fd;
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
@@ -104,10 +105,11 @@ int main(int argc, char *argv[]) {
             } else {
                 int client_fd = events[n].data.fd;
                 buffered_request_t *buffered = buffered_request_for_connection(client_fd);
-
+                static int disable_cork = 0;
                 if (events[n].events & EPOLLHUP) {
                   printf("[%d]Hup Disconnected\n", client_fd);
-                    http_close_connection(buffered);
+                      setsockopt(client_fd, SOL_TCP, TCP_CORK, &disable_cork, sizeof(disable_cork));
+                  http_close_connection(buffered);
                     //                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
                     continue;
                 }
@@ -139,6 +141,8 @@ int main(int argc, char *argv[]) {
                     buffered_request_write_all_available_data(buffered);
                                          
                     if(buffered_request_has_wroten_all(buffered)){
+
+                      setsockopt(client_fd, SOL_TCP, TCP_CORK, &disable_cork, sizeof(disable_cork));
                       //printf("[%d]Disconnected\n", client_fd);
                       http_close_connection(buffered);
                       //epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);
@@ -150,7 +154,7 @@ int main(int argc, char *argv[]) {
 
                 if (events[n].events & EPOLLERR) {
                     printf("[%d] ERR Disconnected\n", client_fd);
-
+                    setsockopt(client_fd, SOL_TCP, TCP_CORK, &disable_cork, sizeof(disable_cork));
                     http_close_connection(buffered);
                     //epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, &ev);                    
                     continue;
