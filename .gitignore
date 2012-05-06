@@ -8,3 +8,4 @@ cscope.out
 *.lo
 *.a
 lib/libev/*
+/nbproject/private/

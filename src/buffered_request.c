@@ -133,9 +133,6 @@ int buffered_request_readline(buffered_request_t * buffered, char *buf, int max_
     
     char* source_bufp = &buffered->readbuf[buffered->readpos];
     buf = source_bufp;
-    char* dest_bufp = buf;
-
-    char c;
     
     for (n = 0; n < max && ( *(source_bufp++) != '\n'); ++n) {
     }

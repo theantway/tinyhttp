@@ -9,13 +9,15 @@
 #define WRITE_BUFFER_SIZE 8192
 #define MAX_LINE 8194
 
+#if USING_LIBEV
 #include "ev.h"
+#endif
 
 typedef struct buffered_request {
     rio_t *rio;
-  //  #if USING_LIBEV
+  #if USING_LIBEV
     ev_io request_ev;
-  //#endif
+  #endif
     int readpos;
     int unread_length;
     char readbuf[REQUEST_MAX_LENGTH];
